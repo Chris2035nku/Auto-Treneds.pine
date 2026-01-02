@@ -1,0 +1,297 @@
+//@version=5
+indicator("Auto Trend Channels OXE", overlay=true, max_lines_count=500, max_labels_count=100)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+grp1 = "═══ Channel Detection ═══"
+pivot_len = input.int(10, "Pivot Length", minval=2, maxval=50, group=grp1, tooltip="Higher = longer-term channels, Lower = shorter-term")
+max_channels = input.int(2, "Max Channels to Show", minval=1, maxval=5, group=grp1)
+extend_right = input.int(50, "Extend Right (bars)", minval=10, maxval=200, group=grp1)
+
+grp2 = "═══ Channel Types ═══"
+show_ascending = input.bool(true, "Show Ascending Channels", group=grp2)
+show_descending = input.bool(true, "Show Descending Channels", group=grp2)
+show_parallel = input.bool(true, "Show Parallel Projection", group=grp2, tooltip="Projects parallel line from opposite swings")
+
+grp3 = "═══ Visual Settings ═══"
+asc_col = input.color(color.blue, "Ascending Channel", group=grp3)
+desc_col = input.color(color.red, "Descending Channel", group=grp3)
+line_width = input.int(2, "Line Width", minval=1, maxval=5, group=grp3)
+show_fill = input.bool(true, "Fill Channels", group=grp3)
+fill_transp = input.int(90, "Fill Transparency", minval=70, maxval=98, group=grp3)
+show_break_alert = input.bool(true, "Highlight Breaks", group=grp3)
+
+grp4 = "═══ Labels ═══"
+show_labels = input.bool(true, "Show Labels", group=grp4)
+label_size = input.string("small", "Label Size", options=["tiny", "small", "normal"], group=grp4)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PIVOT DETECTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+ph = ta.pivothigh(high, pivot_len, pivot_len)
+pl = ta.pivotlow(low, pivot_len, pivot_len)
+
+// Store pivot data
+var float[] ph_prices = array.new_float()
+var int[] ph_times = array.new_int()
+var int[] ph_bars = array.new_int()
+
+var float[] pl_prices = array.new_float()
+var int[] pl_times = array.new_int()
+var int[] pl_bars = array.new_int()
+
+// Collect pivot highs
+if not na(ph)
+    array.unshift(ph_prices, ph)
+    array.unshift(ph_times, time[pivot_len])
+    array.unshift(ph_bars, bar_index - pivot_len)
+    if array.size(ph_prices) > 20
+        array.pop(ph_prices)
+        array.pop(ph_times)
+        array.pop(ph_bars)
+
+// Collect pivot lows
+if not na(pl)
+    array.unshift(pl_prices, pl)
+    array.unshift(pl_times, time[pivot_len])
+    array.unshift(pl_bars, bar_index - pivot_len)
+    if array.size(pl_prices) > 20
+        array.pop(pl_prices)
+        array.pop(pl_times)
+        array.pop(pl_bars)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CHANNEL CALCULATION FUNCTIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Calculate line value at specific bar
+f_line_value(x1, y1, x2, y2, x) =>
+    slope = (y2 - y1) / (x2 - x1)
+    y1 + slope * (x - x1)
+
+// Check if price broke the trendline
+f_check_break(x1, y1, x2, y2, is_resistance) =>
+    current_val = f_line_value(x1, y1, x2, y2, bar_index)
+    if is_resistance
+        close > current_val
+    else
+        close < current_val
+
+// Get label size
+f_label_size() =>
+    switch label_size
+        "tiny" => size.tiny
+        "small" => size.small
+        "normal" => size.normal
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STORAGE FOR DRAWN CHANNELS
+// ══════════════════════════════════════════════════════════════════════════════
+
+var line[] desc_upper_lines = array.new_line()
+var line[] desc_lower_lines = array.new_line()
+var line[] asc_upper_lines = array.new_line()
+var line[] asc_lower_lines = array.new_line()
+var linefill[] desc_fills = array.new_linefill()
+var linefill[] asc_fills = array.new_linefill()
+var label[] channel_labels = array.new_label()
+
+// Clear previous drawings
+if barstate.islast
+    for ln in desc_upper_lines
+        line.delete(ln)
+    for ln in desc_lower_lines
+        line.delete(ln)
+    for ln in asc_upper_lines
+        line.delete(ln)
+    for ln in asc_lower_lines
+        line.delete(ln)
+    for lf in desc_fills
+        linefill.delete(lf)
+    for lf in asc_fills
+        linefill.delete(lf)
+    for lb in channel_labels
+        label.delete(lb)
+    
+    array.clear(desc_upper_lines)
+    array.clear(desc_lower_lines)
+    array.clear(asc_upper_lines)
+    array.clear(asc_lower_lines)
+    array.clear(desc_fills)
+    array.clear(asc_fills)
+    array.clear(channel_labels)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DRAW DESCENDING CHANNELS (connecting swing highs)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast and show_descending and array.size(ph_prices) >= 2
+    channels_drawn = 0
+    i = 0
+    
+    while i < array.size(ph_prices) - 1 and channels_drawn < max_channels
+        p1 = array.get(ph_prices, i)
+        t1 = array.get(ph_times, i)
+        b1 = array.get(ph_bars, i)
+        
+        p2 = array.get(ph_prices, i + 1)
+        t2 = array.get(ph_times, i + 1)
+        b2 = array.get(ph_bars, i + 1)
+        
+        // Only draw if descending (p2 > p1 means older high is higher)
+        if p2 > p1 and b1 != b2
+            // Calculate extension point
+            extend_time = time + extend_right * timeframe.in_seconds() * 1000
+            extend_bar = bar_index + extend_right
+            extend_price = f_line_value(b2, p2, b1, p1, extend_bar)
+            
+            // Check if broken
+            is_broken = f_check_break(b2, p2, b1, p1, true)
+            line_col = is_broken and show_break_alert ? color.new(desc_col, 60) : desc_col
+            line_style = is_broken ? line.style_dashed : line.style_solid
+            
+            // Draw upper trendline (resistance)
+            upper_ln = line.new(t2, p2, extend_time, extend_price, xloc=xloc.bar_time, color=line_col, width=line_width, style=line_style)
+            array.push(desc_upper_lines, upper_ln)
+            
+            // Draw parallel lower line from lowest low between the two highs
+            if show_parallel
+                // Find lowest low between the two pivot highs
+                lowest_low = high
+                lowest_time = t1
+                lowest_bar = b1
+                
+                if array.size(pl_prices) > 0
+                    for j = 0 to array.size(pl_prices) - 1
+                        pl_t = array.get(pl_times, j)
+                        pl_b = array.get(pl_bars, j)
+                        pl_p = array.get(pl_prices, j)
+                        if pl_t >= t2 and pl_t <= t1 and pl_p < lowest_low
+                            lowest_low := pl_p
+                            lowest_time := pl_t
+                            lowest_bar := pl_b
+                
+                // Calculate parallel offset
+                offset = p2 - lowest_low
+                lower_p2 = p2 - offset
+                lower_extend = extend_price - offset
+                
+                lower_ln = line.new(t2, lower_p2, extend_time, lower_extend, xloc=xloc.bar_time, color=line_col, width=line_width, style=line_style)
+                array.push(desc_lower_lines, lower_ln)
+                
+                // Fill
+                if show_fill
+                    fill = linefill.new(upper_ln, lower_ln, color=color.new(desc_col, fill_transp))
+                    array.push(desc_fills, fill)
+            
+            // Label
+            if show_labels
+                lbl_txt = is_broken ? "Desc ✗" : "Desc ▼"
+                lbl = label.new(extend_time, extend_price, lbl_txt, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(desc_col, 80), textcolor=desc_col, size=f_label_size())
+                array.push(channel_labels, lbl)
+            
+            channels_drawn += 1
+        
+        i += 1
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DRAW ASCENDING CHANNELS (connecting swing lows)
+// ══════════════════════════════════════════════════════════════════════════════
+
+if barstate.islast and show_ascending and array.size(pl_prices) >= 2
+    channels_drawn = 0
+    i = 0
+    
+    while i < array.size(pl_prices) - 1 and channels_drawn < max_channels
+        p1 = array.get(pl_prices, i)
+        t1 = array.get(pl_times, i)
+        b1 = array.get(pl_bars, i)
+        
+        p2 = array.get(pl_prices, i + 1)
+        t2 = array.get(pl_times, i + 1)
+        b2 = array.get(pl_bars, i + 1)
+        
+        // Only draw if ascending (p2 < p1 means older low is lower)
+        if p2 < p1 and b1 != b2
+            // Calculate extension point
+            extend_time = time + extend_right * timeframe.in_seconds() * 1000
+            extend_bar = bar_index + extend_right
+            extend_price = f_line_value(b2, p2, b1, p1, extend_bar)
+            
+            // Check if broken
+            is_broken = f_check_break(b2, p2, b1, p1, false)
+            line_col = is_broken and show_break_alert ? color.new(asc_col, 60) : asc_col
+            line_style = is_broken ? line.style_dashed : line.style_solid
+            
+            // Draw lower trendline (support)
+            lower_ln = line.new(t2, p2, extend_time, extend_price, xloc=xloc.bar_time, color=line_col, width=line_width, style=line_style)
+            array.push(asc_lower_lines, lower_ln)
+            
+            // Draw parallel upper line from highest high between the two lows
+            if show_parallel
+                // Find highest high between the two pivot lows
+                highest_high = low
+                highest_time = t1
+                highest_bar = b1
+                
+                if array.size(ph_prices) > 0
+                    for j = 0 to array.size(ph_prices) - 1
+                        ph_t = array.get(ph_times, j)
+                        ph_b = array.get(ph_bars, j)
+                        ph_p = array.get(ph_prices, j)
+                        if ph_t >= t2 and ph_t <= t1 and ph_p > highest_high
+                            highest_high := ph_p
+                            highest_time := ph_t
+                            highest_bar := ph_b
+                
+                // Calculate parallel offset
+                offset = highest_high - p2
+                upper_p2 = p2 + offset
+                upper_extend = extend_price + offset
+                
+                upper_ln = line.new(t2, upper_p2, extend_time, upper_extend, xloc=xloc.bar_time, color=line_col, width=line_width, style=line_style)
+                array.push(asc_upper_lines, upper_ln)
+                
+                // Fill
+                if show_fill
+                    fill = linefill.new(lower_ln, upper_ln, color=color.new(asc_col, fill_transp))
+                    array.push(asc_fills, fill)
+            
+            // Label
+            if show_labels
+                lbl_txt = is_broken ? "Asc ✗" : "Asc ▲"
+                lbl = label.new(extend_time, extend_price, lbl_txt, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(asc_col, 80), textcolor=asc_col, size=f_label_size())
+                array.push(channel_labels, lbl)
+            
+            channels_drawn += 1
+        
+        i += 1
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO TABLE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table info = table.new(position.bottom_right, 2, 4, bgcolor=color.new(#000000, 70), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    table.cell(info, 0, 0, "Auto Channels", text_color=color.white, text_size=size.small)
+    table.cell(info, 1, 0, timeframe.period, text_color=color.yellow, text_size=size.small)
+    
+    table.cell(info, 0, 1, "Pivot Length", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 1, str.tostring(pivot_len), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(info, 0, 2, "Swing Highs", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 2, str.tostring(array.size(ph_prices)), text_color=desc_col, text_size=size.tiny)
+    
+    table.cell(info, 0, 3, "Swing Lows", text_color=color.gray, text_size=size.tiny)
+    table.cell(info, 1, 3, str.tostring(array.size(pl_prices)), text_color=asc_col, text_size=size.tiny)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+alertcondition(ta.crossover(close, ta.highest(high, pivot_len * 2)), "Channel Break Up", "Price broke above descending channel")
+alertcondition(ta.crossunder(close, ta.lowest(low, pivot_len * 2)), "Channel Break Down", "Price broke below ascending channel")
